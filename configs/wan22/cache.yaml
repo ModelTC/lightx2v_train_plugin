@@ -1,0 +1,61 @@
+plugins:
+  - lightx2v_train_plugin.wan22
+
+runtime:
+  seed: 42
+
+model:
+  name: wan22_t2v_a14b
+  expert: high
+  pretrained_model_name_or_path: ${oc.env:WAN22_MODEL_ROOT,/data/models/Wan2.2-T2V-A14B}
+  running_dtype: bf16
+  transformer_param_dtype: bf16
+  latent_dtype: bf16
+  vae_dtype: bf16
+  t5_dtype: bf16
+  load_transformer: false
+  load_vae: true
+  load_text_encoder: true
+
+distributed:
+  backend: nccl
+  sequence_parallel:
+    enabled: false
+    size: 1
+  fsdp2:
+    enabled: false
+
+data:
+  train:
+    name: video_dataset
+    data_path:
+      - ${oc.env:WAN22_METADATA,/data/wushuo/exps/exps_1109/diffsynth_wan22_lora_8/data/wan22_t2v_480p/metadata.csv}
+    video_column: video
+    prompt_column: prompt
+    height: 480
+    width: 832
+    num_frames: 49
+    frame_rate: 24
+    fix_frame_rate: false
+    random_start: false
+    dataset_repeat: 1
+    prompt_dropout_rate: 0.0
+    num_workers: 0
+
+scheduler:
+  num_train_timesteps: 1000
+  shift: 5.0
+  timestep_distribution: uniform
+  min_sigma: 0.001
+  max_sigma: 1.0
+  time_shift_settings:
+    do_time_shift: false
+
+training:
+  method: flow_matching
+
+inference:
+  method: none
+
+logging:
+  rank_zero_only: true

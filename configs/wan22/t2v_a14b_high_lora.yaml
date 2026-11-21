@@ -1,0 +1,89 @@
+plugins:
+  - lightx2v_train_plugin.wan22
+
+runtime:
+  seed: 42
+
+model:
+  name: wan22_t2v_a14b
+  expert: high
+  pretrained_model_name_or_path: ${oc.env:WAN22_MODEL_ROOT,/data/models/Wan2.2-T2V-A14B}
+  running_dtype: bf16
+  transformer_param_dtype: bf16
+  latent_dtype: bf16
+  vae_dtype: bf16
+  t5_dtype: bf16
+  load_transformer: true
+  load_vae: false
+  load_text_encoder: false
+
+distributed:
+  backend: nccl
+  timeout_minutes: 60
+  sequence_parallel:
+    enabled: false
+    size: 1
+  fsdp2:
+    enabled: true
+    size: ${oc.env:WORLD_SIZE,1}
+    reshard_after_forward:
+      root_reshard: false
+      block_reshard: true
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      output_dtype: null
+      cast_forward_inputs: false
+
+data:
+  train:
+    name: cache_dataset
+    data_path:
+      - ${oc.env:WAN22_CACHE_DIR,/data/wushuo/lightx2v_train_plugin/outputs/cache}/train_data.jsonl
+    prompt_dropout_rate: 0.0
+    num_workers: 0
+    pin_memory: true
+    shuffle: true
+
+scheduler:
+  num_train_timesteps: 1000
+  shift: 5.0
+  timestep_distribution: uniform
+  min_sigma: 0.001
+  max_sigma: 1.0
+  time_shift_settings:
+    do_time_shift: false
+
+training:
+  method: wan22_sft
+  train_type: lora
+  max_train_iters: 250
+  gradient_accumulation_iters: 1
+  gradient_checkpointing: true
+  gradient_checkpointing_offload: true
+  max_grad_norm: 1.0
+  lr_scheduler: constant_with_warmup
+  lr_warmup_iters: 5
+  save_every_iters: 250
+  save_total_limit: 2
+  lora:
+    rank: 32
+    alpha: 32
+    target_modules: [q, k, v, o, ffn.0, ffn.2]
+  optimizer:
+    learning_rate: 0.0001
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    weight_decay: 0.01
+    adam_epsilon: 0.00000001
+  output_dir: ${oc.env:WAN22_OUTPUT_ROOT,/data/wushuo/lightx2v_train_plugin/outputs}/high_lora
+
+inference:
+  method: none
+
+logging:
+  rank_zero_only: true
+  train_log_every_iters: 10
+
+resume:
+  auto_resume: false
