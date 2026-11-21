@@ -1,0 +1,71 @@
+plugins:
+  - lightx2v_train_plugin.z_image
+
+runtime:
+  seed: 42
+
+model:
+  name: z_image
+  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image-Turbo}
+  max_sequence_length: 512
+  running_dtype: bf16
+  transformer_param_dtype: bf16
+  latent_dtype: fp32
+  text_encoder_dtype: bf16
+  vae_dtype: fp32
+
+distributed:
+  backend: nccl
+  timeout_minutes: 60
+  sequence_parallel:
+    enabled: false
+    size: 1
+  fsdp2:
+    enabled: true
+    size: ${oc.env:WORLD_SIZE,1}
+    reshard_after_forward:
+      root_reshard: false
+      block_reshard: true
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      output_dtype: null
+      cast_forward_inputs: false
+
+data:
+  processor:
+    name: z_image
+    size_multiple: 16
+  val:
+    name: image_dataset
+    data_path:
+      - ${oc.env:Z_IMAGE_VALIDATION_METADATA,/data/wushuo/lightx2v_train_plugin/outputs/z_image/data/val.jsonl}
+    num_workers: 0
+    shuffle: false
+
+scheduler:
+  num_train_timesteps: 1000
+  time_shift_settings:
+    do_time_shift: true
+    shift_type: linear
+    time_shift_mu: 3.0
+    time_shift_power: 1.0
+    dynamic_shift: false
+
+inference:
+  method: image_infer
+  default_height: 1024
+  default_width: 1024
+  num_inference_steps: 30
+  enable_cfg: true
+  # Native Z-Image guidance 1 equals standard CFG 2.
+  cfg_guidance_scale: 1.0
+  negative_prompt: ""
+  seed: 42
+  output_dir: ${oc.env:Z_IMAGE_INFER_OUTPUT,/data/wushuo/lightx2v_train_plugin/outputs/z_image/inference}
+  lora_config:
+    path: ${oc.env:Z_IMAGE_LORA,''}
+
+logging:
+  rank_zero_only: true
+  infer_log_every_steps: 10

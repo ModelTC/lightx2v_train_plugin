@@ -1,0 +1,46 @@
+plugins:
+  - lightx2v_train_plugin.z_image
+
+runtime:
+  seed: 42
+
+model:
+  name: z_image
+  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image-Turbo}
+  max_sequence_length: 512
+  running_dtype: bf16
+  transformer_param_dtype: bf16
+  latent_dtype: fp32
+  text_encoder_dtype: bf16
+  vae_dtype: fp32
+
+distributed:
+  backend: nccl
+  sequence_parallel:
+    enabled: false
+    size: 1
+  fsdp2:
+    enabled: false
+    size: ${oc.env:WORLD_SIZE,1}
+
+data:
+  processor:
+    name: z_image
+    target_area: 1048576
+    size_multiple: 16
+  train:
+    name: image_dataset
+    data_path:
+      - ${oc.env:Z_IMAGE_METADATA,/data/wushuo/lightx2v_train_plugin/outputs/z_image/data/train.jsonl}
+    prompt_dropout_rate: 0.0
+    num_workers: 0
+    shuffle: false
+
+training:
+  method: flow_matching
+
+inference:
+  method: none
+
+logging:
+  rank_zero_only: true
