@@ -44,11 +44,19 @@ def main():
                 OmegaConf.save(OmegaConf.create(selected), config_path)
                 print(f"prompt={index + 1} seed={seed} output={selected['inference']['output_dir']}", flush=True)
                 if not args.dry_run:
-                    subprocess.run([
-                        sys.executable, "-m", "torch.distributed.run", "--standalone",
-                        f"--nproc_per_node={os.environ.get('NPROC_PER_NODE', '8')}",
-                        str(host / "lightx2v_train/infer.py"), "--config", str(config_path),
-                    ], check=True)
+                    subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "torch.distributed.run",
+                            "--standalone",
+                            f"--nproc_per_node={os.environ.get('NPROC_PER_NODE', '8')}",
+                            str(host / "lightx2v_train/infer.py"),
+                            "--config",
+                            str(config_path),
+                        ],
+                        check=True,
+                    )
 
 
 if __name__ == "__main__":

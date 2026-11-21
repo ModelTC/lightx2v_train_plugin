@@ -1,7 +1,6 @@
 """Image preprocessing for Z-Image-Turbo training."""
 
 from diffusers.image_processor import VaeImageProcessor
-
 from lightx2v_train.utils.image_ops import (
     align_dimension,
     calculate_area_dimensions,
@@ -52,9 +51,7 @@ class ZImageDataProcessor:
         if height is None and width is None:
             return None, None
         if height is None or width is None:
-            raise ValueError(
-                "meta.target_height and meta.target_width must be provided together"
-            )
+            raise ValueError("meta.target_height and meta.target_width must be provided together")
         return int(height), int(width)
 
     def __call__(self, sample):

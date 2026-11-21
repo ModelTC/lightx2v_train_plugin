@@ -15,6 +15,18 @@ plugins:
 
 插件包不需要安装。每次任务启动时加载选中的模块；修改源码后，下次启动生效。顶层包不导入所有模型。
 
+## 开发检查
+
+代码检查沿用 LightX2V 主仓的 pre-commit 配置：Ruff hook 固定为 `v0.11.0`，通用 hooks 为 `v4.5.0`，Python 目标版本为 3.11，行宽 200、缩进 4，并检查导入顺序、行尾空白、文件末尾换行、YAML/TOML/JSON 语法、大小写冲突、合并标记、调试语句和 3MB 文件大小限制。插件包名在 Ruff 中声明为 `lightx2v_train_plugin`。
+
+```bash
+pip install ruff pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+`pre-commit install` 安装本地提交 hook；GitHub CI 会在 pull request 和推送到 `main` 时运行相同检查。`--all-files` 检查 Git 已跟踪文件；新增文件需要先 `git add`，或用 `pre-commit run --files path/to/file` 单独检查。
+
 ## Wan2.2 T2V A14B SFT
 
 参考实验是 `/data/wushuo/exps/exps_1109/diffsynth_wan22_lora_8/outputs/runs/a10040g_20261110_first_epoch`。
@@ -74,13 +86,7 @@ TRAIN_PYTHON=/app/miniconda/bin/python NPROC_PER_NODE=8 \
 
 这里复用主项目双专家推理和 FSDP2；参考实验的单卡逐层 CPU offload 与 tiled VAE 没有移植，实际显存和图像解码数值需要单独验证。
 
-### 检查
-
-```bash
-/app/miniconda/bin/python -m pytest tests -q
-```
-
-测试覆盖固定输入下的时间表、loss/梯度、学习率和缓存转换。通过 CPU 数值测试不等于已经完成真实 A14B 多卡训练；运行训练或生成前需使用具备主项目依赖及 GPU 访问的环境。
+运行训练或生成前需使用具备主项目依赖及 GPU 访问的环境。
 
 ## Z-Image-Turbo 图像 SFT / LoRA
 
@@ -137,7 +143,5 @@ NPROC_PER_NODE=8 bash scripts/infer_z_image.sh
 这里的 `cfg_guidance_scale` 遵循 Z-Image 原生公式 `positive + scale * (positive - negative)`，所以原生值 `1.0` 等于标准 CFG 2。评估 Turbo 少步效果时，使用自定义配置将 `num_inference_steps` 改成 `8`、`enable_cfg` 改成 `false`；主框架的 8 步对应官方 pipeline `num_inference_steps=9` 的 8 次有效前向。可通过 `CONFIG=/path/to/infer.yaml` 选择配置。
 
 **Turbo 限制：** 这里实现常规 flow matching SFT，没有加载训练辅助 adapter 或进行再蒸馏。普通微调可能损害原模型的 8 步生成能力，不能把训练后的 LoRA 视为已保留 Turbo 加速。评估时可参考 30 步、CFG 2 的普通 SFT 设置；是否满足质量要求需用实际数据验证。需要保持少步能力时，应另外接入 differential LoRA / 蒸馏训练。参见 [DiffSynth 的 Z-Image 训练说明](https://github.com/modelscope/DiffSynth-Studio/blob/main/docs/en/Model_Details/Z-Image.md) 和 [Diffusers 官方 Z-Image pipeline](https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/z_image/pipeline_z_image.py)。
-
-`tests/test_z_image.py` 使用真实 tiny Transformer 覆盖 latent 缩放、速度符号、CFG、梯度、横竖图处理、缓存、序列并行拒绝检查，以及 LoRA 两步训练、第 3 步恢复和导出重载一致性。设置上文的 `PYTHONPATH` 后，可运行 `/app/miniconda/bin/python -m pytest tests/test_z_image.py -q`。
 
 2026-11-21 使用真实 Z-Image-Turbo 权重、32 张图片、约 1024×1024 目标面积，在 8 张 A100 40GB 上完成 1000 步 LoRA（250 轮），训练耗时约 29 分钟，保留每 100 步的全部 10 份 checkpoint。最终 476 个 LoRA tensor 均为有限值，训练步数及分布式恢复文件检查通过。另用 8 条验证提示词、seeds 42–49 完成原模型/最终 LoRA × 8 步无 CFG/30 步标准 CFG 2 的 32 张 1024×1024 推理图，逐 prompt 初始噪声哈希一致；图像可读性和 SHA256 检查通过。实验的脚本、配置、源码快照、日志、权重及对照图保存在本机 `/data/wushuo/exps/exps_1121/z_image_turbo_lora_dataset_v1_32_20261121_111037/`，不随代码仓库发布。该结果验证训练和推理链路，不代表广泛的生成质量评估。

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import torch
 from diffusers import AutoencoderKL, ZImagePipeline, ZImageTransformer2DModel
 from diffusers.image_processor import VaeImageProcessor
-
 from lightx2v_train.model_capabilities import FlowMatchingSFTCapability
 from lightx2v_train.model_zoo.base import BaseModel
 from lightx2v_train.model_zoo.capability_adapters.common import (
@@ -64,9 +63,7 @@ class ZImageModel(BaseModel):
         load_condition_encoder,
     ):
         if get_sequence_parallel_world_size() > 1:
-            raise ValueError(
-                "Z-Image does not support sequence parallel training; set distributed.sequence_parallel.enabled=false."
-            )
+            raise ValueError("Z-Image does not support sequence parallel training; set distributed.sequence_parallel.enabled=false.")
         model_path = self.config["model"]["pretrained_model_name_or_path"]
         if load_condition_encoder:
             self._load_condition_encoder(model_path)
@@ -74,9 +71,7 @@ class ZImageModel(BaseModel):
             self._load_vae(model_path)
         else:
             self._load_vae_config(model_path)
-        self.image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor * 2
-        )
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor * 2)
         if load_transformer:
             self.transformer = self.load_transformer(model_path)
 
@@ -93,11 +88,7 @@ class ZImageModel(BaseModel):
         self.text_pipeline.text_encoder.eval()
 
     def _load_vae(self, model_path):
-        use_cpu = (
-            not is_cache_build(self.config)
-            and is_train_cache_dataset(self.config)
-            and self.config.get("inference", {}).get("vae_cpu_offload", False)
-        )
+        use_cpu = not is_cache_build(self.config) and is_train_cache_dataset(self.config) and self.config.get("inference", {}).get("vae_cpu_offload", False)
         device = torch.device("cpu") if use_cpu else self.device
         self.vae = AutoencoderKL.from_pretrained(
             model_path,
@@ -132,9 +123,7 @@ class ZImageModel(BaseModel):
 
     def load_transformer(self, model_path):
         # FSDP2 shards from the host device before moving blocks to workers.
-        device = (
-            get_backend().host_device if fsdp2_enabled(self.config) else self.device
-        )
+        device = get_backend().host_device if fsdp2_enabled(self.config) else self.device
         transformer = ZImageTransformer2DModel.from_pretrained(
             model_path,
             subfolder="transformer",
@@ -211,15 +200,11 @@ class ZImageModel(BaseModel):
         if image.ndim == 3:
             image = image.unsqueeze(0)
         if image.ndim != 4:
-            raise ValueError(
-                f"Expected target_pixel_values with shape [B, C, H, W], got {tuple(image.shape)}"
-            )
+            raise ValueError(f"Expected target_pixel_values with shape [B, C, H, W], got {tuple(image.shape)}")
         height, width = image.shape[-2:]
         multiple = self.vae_scale_factor * 2
         if height <= 0 or width <= 0 or height % multiple or width % multiple:
-            raise ValueError(
-                f"Z-Image target dimensions must be positive multiples of {multiple}, got {height}x{width}."
-            )
+            raise ValueError(f"Z-Image target dimensions must be positive multiples of {multiple}, got {height}x{width}.")
         image = image.to(device=self.device, dtype=self.vae_dtype)
         with self._active_vae() as vae:
             latent = getattr(vae.encode(image).latent_dist, mode)()
@@ -246,19 +231,12 @@ class ZImageModel(BaseModel):
     def prepare_denoiser_input(self, noisy_latent, condition=None):
         del condition
         if noisy_latent.ndim != 4:
-            raise ValueError(
-                f"Z-Image expects image latents with shape [B, C, H, W], got {tuple(noisy_latent.shape)}"
-            )
+            raise ValueError(f"Z-Image expects image latents with shape [B, C, H, W], got {tuple(noisy_latent.shape)}")
         # Diffusers' native API represents each image as [C, F, H, W] with
         # F=1.  Keeping one list item per batch element also handles cached
         # conditions and future physical batch sizes consistently.
-        images = [
-            latent.to(device=self.device, dtype=self.running_dtype).unsqueeze(1)
-            for latent in noisy_latent.unbind(dim=0)
-        ]
-        return ZImageDenoiserInput(
-            images=images, height=noisy_latent.shape[-2], width=noisy_latent.shape[-1]
-        )
+        images = [latent.to(device=self.device, dtype=self.running_dtype).unsqueeze(1) for latent in noisy_latent.unbind(dim=0)]
+        return ZImageDenoiserInput(images=images, height=noisy_latent.shape[-2], width=noisy_latent.shape[-1])
 
     def denoise(self, denoiser_input, timestep_or_sigma, condition):
         prompt_embeds = condition.get("prompt_embed")
@@ -271,23 +249,16 @@ class ZImageModel(BaseModel):
             if len(prompt_embeds) == 1:
                 prompt_embeds = prompt_embeds * batch_size
             else:
-                raise ValueError(
-                    f"Z-Image prompt batch size {len(prompt_embeds)} does not match latent batch size {batch_size}."
-                )
+                raise ValueError(f"Z-Image prompt batch size {len(prompt_embeds)} does not match latent batch size {batch_size}.")
         sigma = timestep_or_sigma.float().reshape(-1)
         if sigma.numel() == 1:
             sigma = sigma.expand(batch_size)
         if sigma.numel() != batch_size:
-            raise ValueError(
-                f"Z-Image timestep batch size {sigma.numel()} does not match {batch_size}."
-            )
+            raise ValueError(f"Z-Image timestep batch size {sigma.numel()} does not match {batch_size}.")
         # The scheduler samples sigma (noise fraction), while the native
         # pipeline feeds the reverse normalized timestep to the transformer.
         transformer_t = (1.0 - sigma).to(device=self.device, dtype=torch.float32)
-        prompt_embeds = [
-            item.to(device=self.device, dtype=self.running_dtype)
-            for item in prompt_embeds
-        ]
+        prompt_embeds = [item.to(device=self.device, dtype=self.running_dtype) for item in prompt_embeds]
         with self.transformer_forward_context():
             raw = self.transformer(
                 denoiser_input.images,
@@ -314,18 +285,14 @@ class ZImageModel(BaseModel):
     def prepare_infer_latents(self, height, width, generator=None):
         multiple = self.vae_scale_factor * 2
         if height <= 0 or width <= 0 or height % multiple or width % multiple:
-            raise ValueError(
-                f"Z-Image dimensions must be positive multiples of {multiple}, got {height}x{width}."
-            )
+            raise ValueError(f"Z-Image dimensions must be positive multiples of {multiple}, got {height}x{width}.")
         shape = (
             1,
             self.latent_channels,
             height // self.vae_scale_factor,
             width // self.vae_scale_factor,
         )
-        return torch.randn(
-            shape, generator=generator, device=self.device, dtype=self.latent_dtype
-        )
+        return torch.randn(shape, generator=generator, device=self.device, dtype=self.latent_dtype)
 
     def decode_latent(self, latent):
         latent = self._denormalize_latents(latent.to(dtype=self.vae_dtype))
