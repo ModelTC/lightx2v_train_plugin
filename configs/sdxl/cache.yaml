@@ -1,0 +1,57 @@
+plugins:
+  - lightx2v_train_plugin.sdxl
+
+runtime:
+  seed: 42
+
+model:
+  name: sdxl
+  pretrained_model_name_or_path: ${oc.env:SDXL_MODEL_ROOT,/data/models/stable-diffusion-xl-base-1.0}
+  unet_path: ${oc.env:SDXL_UNET_ROOT,${model.pretrained_model_name_or_path}/unet}
+  running_dtype: bf16
+  transformer_param_dtype: bf16
+  latent_dtype: fp32
+  text_encoder_dtype: bf16
+  vae_dtype: fp32
+
+distributed:
+  backend: nccl
+  sequence_parallel:
+    enabled: false
+    size: 1
+  fsdp2:
+    enabled: false
+    size: ${oc.env:WORLD_SIZE,1}
+
+data:
+  processor:
+    name: sdxl
+    target_area: 1048576
+    size_multiple: 64
+  train:
+    name: image_dataset
+    data_path:
+      - ${oc.env:SDXL_METADATA,/data/wushuo/data/dataset_v1_32/train.jsonl}
+    prompt_dropout_rate: 0.0
+    num_workers: 0
+    shuffle: false
+  val:
+    name: image_dataset
+    data_path:
+      - ${oc.env:SDXL_VALIDATION_METADATA,/data/wushuo/data/dataset_v1_32/val.jsonl}
+    prompt_dropout_rate: 0.0
+    num_workers: 0
+    shuffle: false
+
+training:
+  # The host uses this capability only to encode the cache, never for its loss.
+  method: flow_matching
+
+inference:
+  method: none
+  default_height: 1024
+  default_width: 1024
+  negative_prompt: ""
+
+logging:
+  rank_zero_only: true

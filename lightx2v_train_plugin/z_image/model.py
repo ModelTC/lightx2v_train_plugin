@@ -1,13 +1,6 @@
-"""Native LightX2V training adapter for Tongyi-MAI/Z-Image-Turbo.
-
-Z-Image uses a single-stream DiT whose transformer API differs from the
-packed-token API used by Qwen-Image and Flux.  The adapter keeps the model's
-native list-of-images/list-of-caption-features interface and exposes the
-standard flow-matching hooks used by the host trainer.
-"""
+"""Z-Image-Turbo adapter with native image-list inputs and flow-matching loss."""
 
 import math
-from dataclasses import dataclass
 
 import torch
 from diffusers import AutoencoderKL, ZImagePipeline, ZImageTransformer2DModel
@@ -25,26 +18,8 @@ from lightx2v_train.utils.registry import MODEL_REGISTER
 from lightx2v_train.utils.utils import is_cache_build, is_train_cache_dataset
 
 
-@dataclass
-class ZImageDenoiserInput:
-    """Unpacked input expected by ``ZImageTransformer2DModel``."""
-
-    images: list[torch.Tensor]
-    height: int
-    width: int
-
-
 @MODEL_REGISTER("z_image")
 class ZImageModel(BaseModel):
-    """Train the DiT in ``Tongyi-MAI/Z-Image-Turbo`` with SFT or LoRA.
-
-    The implementation follows the official diffusers pipeline: VAE latents
-    are normalized with the VAE shift/scaling factors, text is encoded with
-    Qwen3's chat template, and the transformer receives ``1 - sigma`` as its
-    timestep.  Diffusers returns the opposite velocity sign, so ``denoise``
-    negates its output before handing it to the generic flow-matching loss.
-    """
-
     pipeline_cls = ZImagePipeline
     default_unconditional_prompt = ""
 
@@ -69,15 +44,15 @@ class ZImageModel(BaseModel):
             self._load_condition_encoder(model_path)
         if load_vae:
             self._load_vae(model_path)
+            self.vae_config = self.vae.config
         else:
-            self._load_vae_config(model_path)
+            self.vae_config = AutoencoderKL.load_config(model_path, subfolder="vae")
+        self.vae_scale_factor = self._scale_factor_from_config(self.vae_config)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor * 2)
         if load_transformer:
             self.transformer = self.load_transformer(model_path)
 
     def _load_condition_encoder(self, model_path):
-        # Loading the pipeline without VAE/DiT avoids duplicating the large
-        # trainable transformer while retaining the official prompt encoding.
         self.text_pipeline = self.pipeline_cls.from_pretrained(
             model_path,
             transformer=None,
@@ -95,24 +70,12 @@ class ZImageModel(BaseModel):
             subfolder="vae",
             torch_dtype=self.vae_dtype,
         ).to(device)
-        self.vae_config = self.vae.config
-        self.vae_scale_factor = self._scale_factor_from_config(self.vae_config)
         self.vae.requires_grad_(False)
         self.vae.eval()
 
-    def _load_vae_config(self, model_path):
-        self.vae_config = AutoencoderKL.load_config(model_path, subfolder="vae")
-        self.vae_scale_factor = self._scale_factor_from_config(self.vae_config)
-
     @staticmethod
-    def _config_value(config, name, default=None):
-        if isinstance(config, dict):
-            return config.get(name, default)
-        return getattr(config, name, default)
-
-    @classmethod
-    def _scale_factor_from_config(cls, config):
-        block_out_channels = cls._config_value(config, "block_out_channels")
+    def _scale_factor_from_config(config):
+        block_out_channels = config.get("block_out_channels")
         if not block_out_channels:
             raise ValueError("Z-Image VAE config has no block_out_channels.")
         return 2 ** (len(block_out_channels) - 1)
@@ -122,7 +85,6 @@ class ZImageModel(BaseModel):
         self.vae_scale_factor = source.vae_scale_factor
 
     def load_transformer(self, model_path):
-        # FSDP2 shards from the host device before moving blocks to workers.
         device = get_backend().host_device if fsdp2_enabled(self.config) else self.device
         transformer = ZImageTransformer2DModel.from_pretrained(
             model_path,
@@ -135,25 +97,14 @@ class ZImageModel(BaseModel):
         return self.transformer
 
     def fsdp2_shard_plan(self, fsdp_config):
-        reshard_config = fsdp_config["reshard_after_forward"]
-        plan = []
-        for modules in (
+        reshard = fsdp_config["reshard_after_forward"]
+        blocks = (
             self.transformer.noise_refiner,
             self.transformer.context_refiner,
             self.transformer.layers,
-        ):
-            plan.append(
-                {
-                    "modules": modules,
-                    "reshard_after_forward": reshard_config["block_reshard"],
-                }
-            )
-        plan.append(
-            {
-                "module": self.transformer,
-                "reshard_after_forward": reshard_config["root_reshard"],
-            }
         )
+        plan = [{"modules": modules, "reshard_after_forward": reshard["block_reshard"]} for modules in blocks]
+        plan.append({"module": self.transformer, "reshard_after_forward": reshard["root_reshard"]})
         return plan
 
     def add_lora(self, rank, alpha, target_modules):
@@ -165,28 +116,27 @@ class ZImageModel(BaseModel):
 
     @property
     def latent_channels(self):
-        channels = self._config_value(self.vae_config, "latent_channels")
+        channels = self.vae_config.get("latent_channels")
         if channels is None:
             channels = self.transformer.config.in_channels
         return int(channels)
 
-    def _latent_statistics(self, latents):
-        scaling = self._config_value(self.vae_config, "scaling_factor", 1.0)
-        shift = self._config_value(self.vae_config, "shift_factor", 0.0)
+    def _latent_scale_shift(self, latents):
+        scaling = float(self.vae_config.get("scaling_factor", 1.0))
+        shift = self.vae_config.get("shift_factor", 0.0)
         shift = 0.0 if shift is None else float(shift)
-        scaling = float(scaling)
         if not math.isfinite(scaling) or scaling <= 0:
             raise ValueError("Z-Image VAE scaling_factor must be positive and finite.")
         if not math.isfinite(shift):
             raise ValueError("Z-Image VAE shift_factor must be finite.")
-        return latents.new_tensor(float(scaling)), latents.new_tensor(float(shift))
+        return latents.new_tensor(scaling), latents.new_tensor(shift)
 
     def _normalize_latents(self, latents):
-        scaling, shift = self._latent_statistics(latents)
+        scaling, shift = self._latent_scale_shift(latents)
         return (latents - shift) * scaling
 
     def _denormalize_latents(self, latents):
-        scaling, shift = self._latent_statistics(latents)
+        scaling, shift = self._latent_scale_shift(latents)
         return latents / scaling + shift
 
     def encode_to_latent(self, sample):
@@ -214,10 +164,7 @@ class ZImageModel(BaseModel):
         return self.encode_prompt_condition(sample["conditioning"]["prompt"])
 
     def encode_prompt_condition(self, prompt):
-        if isinstance(prompt, str):
-            prompts = [prompt]
-        else:
-            prompts = list(prompt)
+        prompts = [prompt] if isinstance(prompt, str) else list(prompt)
         if not prompts:
             raise ValueError("Z-Image training requires at least one prompt.")
         prompt_embeds, _ = self.text_pipeline.encode_prompt(
@@ -232,11 +179,8 @@ class ZImageModel(BaseModel):
         del condition
         if noisy_latent.ndim != 4:
             raise ValueError(f"Z-Image expects image latents with shape [B, C, H, W], got {tuple(noisy_latent.shape)}")
-        # Diffusers' native API represents each image as [C, F, H, W] with
-        # F=1.  Keeping one list item per batch element also handles cached
-        # conditions and future physical batch sizes consistently.
-        images = [latent.to(device=self.device, dtype=self.running_dtype).unsqueeze(1) for latent in noisy_latent.unbind(dim=0)]
-        return ZImageDenoiserInput(images=images, height=noisy_latent.shape[-2], width=noisy_latent.shape[-1])
+        # The native transformer takes one [C, 1, H, W] tensor per image.
+        return [latent.to(device=self.device, dtype=self.running_dtype).unsqueeze(1) for latent in noisy_latent.unbind(dim=0)]
 
     def denoise(self, denoiser_input, timestep_or_sigma, condition):
         prompt_embeds = condition.get("prompt_embed")
@@ -244,7 +188,7 @@ class ZImageModel(BaseModel):
             raise KeyError("Z-Image condition is missing prompt_embed.")
         if not isinstance(prompt_embeds, list):
             prompt_embeds = [prompt_embeds]
-        batch_size = len(denoiser_input.images)
+        batch_size = len(denoiser_input)
         if len(prompt_embeds) != batch_size:
             if len(prompt_embeds) == 1:
                 prompt_embeds = prompt_embeds * batch_size
@@ -255,21 +199,19 @@ class ZImageModel(BaseModel):
             sigma = sigma.expand(batch_size)
         if sigma.numel() != batch_size:
             raise ValueError(f"Z-Image timestep batch size {sigma.numel()} does not match {batch_size}.")
-        # The scheduler samples sigma (noise fraction), while the native
-        # pipeline feeds the reverse normalized timestep to the transformer.
+        # Z-Image uses the reverse timestep and opposite velocity sign.
         transformer_t = (1.0 - sigma).to(device=self.device, dtype=torch.float32)
         prompt_embeds = [item.to(device=self.device, dtype=self.running_dtype) for item in prompt_embeds]
         with self.transformer_forward_context():
-            raw = self.transformer(
-                denoiser_input.images,
+            outputs = self.transformer(
+                denoiser_input,
                 transformer_t,
                 prompt_embeds,
                 return_dict=False,
                 patch_size=self.transformer.config.all_patch_size[0],
                 f_patch_size=self.transformer.config.all_f_patch_size[0],
             )[0]
-        # ``raw`` is a list of [C, 1, H, W] outputs, one per batch item.
-        prediction = torch.stack([item[:, 0] for item in raw], dim=0)
+        prediction = torch.stack([item[:, 0] for item in outputs], dim=0)
         return -prediction
 
     def postprocess_denoiser_output(self, prediction, denoiser_input):
@@ -277,8 +219,7 @@ class ZImageModel(BaseModel):
         return prediction
 
     def apply_cfg(self, positive, negative, guidance_scale):
-        # Z-Image's guidance scale is measured from the conditional prediction:
-        # scale=0 preserves it, unlike the host's generic CFG convention.
+        # Native Z-Image CFG starts at the conditional prediction (scale=0).
         positive, negative = positive.float(), negative.float()
         return positive + guidance_scale * (positive - negative)
 

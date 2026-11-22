@@ -1,0 +1,68 @@
+plugins:
+  - lightx2v_train_plugin.sdxl
+
+runtime:
+  seed: 42
+
+model:
+  name: sdxl
+  pretrained_model_name_or_path: ${oc.env:SDXL_MODEL_ROOT,/data/models/stable-diffusion-xl-base-1.0}
+  # Point SDXL_UNET_ROOT at checkpoint-*/unet for full-parameter weights.
+  unet_path: ${oc.env:SDXL_UNET_ROOT,${model.pretrained_model_name_or_path}/unet}
+  running_dtype: bf16
+  transformer_param_dtype: bf16
+  latent_dtype: fp32
+  text_encoder_dtype: bf16
+  vae_dtype: fp32
+
+distributed:
+  backend: nccl
+  timeout_minutes: 60
+  sequence_parallel:
+    enabled: false
+    size: 1
+  fsdp2:
+    enabled: true
+    size: ${oc.env:WORLD_SIZE,1}
+    reshard_after_forward:
+      root_reshard: false
+      block_reshard: true
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      output_dtype: null
+      cast_forward_inputs: false
+
+data:
+  processor:
+    name: sdxl
+    size_multiple: 64
+  val:
+    name: cache_dataset
+    data_path:
+      - ${oc.env:SDXL_VAL_CACHE_DIR,${oc.env:SDXL_OUTPUT_ROOT,/data/wushuo/lightx2v_train_plugin/outputs/sdxl}/cache_val}/cache_data.jsonl
+    num_workers: 0
+    shuffle: false
+
+scheduler:
+  num_train_timesteps: 1000
+  prediction_type: epsilon
+  time_shift_settings:
+    do_time_shift: false
+
+inference:
+  method: sdxl_infer
+  default_height: 1024
+  default_width: 1024
+  num_inference_steps: 30
+  enable_cfg: true
+  cfg_guidance_scale: 5.0
+  negative_prompt: ""
+  seed: 42
+  output_dir: ${oc.env:SDXL_INFER_OUTPUT,${oc.env:SDXL_OUTPUT_ROOT,/data/wushuo/lightx2v_train_plugin/outputs/sdxl}/inference}
+  lora_config:
+    path: ${oc.env:SDXL_LORA,''}
+
+logging:
+  rank_zero_only: true
+  infer_log_every_steps: 10

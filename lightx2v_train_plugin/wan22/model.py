@@ -17,19 +17,19 @@ from .sft import Wan22SFTCapability
 class Wan22T2VModel(WanT2VModel):
     def __init__(self, config):
         config = deepcopy(config)
-        model = config["model"]
-        self.expert = model.get("expert")
+        model_config = config["model"]
+        self.expert = model_config.get("expert")
         if self.expert not in {"high", "low"}:
             raise ValueError("model.expert must be 'high' or 'low'.")
-        if model.get("causal", False):
+        if model_config.get("causal", False):
             raise ValueError("Wan2.2 T2V SFT uses the non-causal transformer.")
-        root = Path(model["pretrained_model_name_or_path"])
-        model.setdefault("components_root", str(root))
-        model["transformer_path"] = str(root / f"{self.expert}_noise_model")
-        model.setdefault("running_dtype", "bf16")
-        model.setdefault("transformer_param_dtype", "bf16")
-        model.setdefault("latent_dtype", "bf16")
-        model.setdefault("vae_dtype", "bf16")
+        root = Path(model_config["pretrained_model_name_or_path"])
+        model_config.setdefault("components_root", str(root))
+        model_config["transformer_path"] = str(root / f"{self.expert}_noise_model")
+        model_config.setdefault("running_dtype", "bf16")
+        model_config.setdefault("transformer_param_dtype", "bf16")
+        model_config.setdefault("latent_dtype", "bf16")
+        model_config.setdefault("vae_dtype", "bf16")
         super().__init__(config)
 
     def register_capabilities(self):
@@ -37,13 +37,13 @@ class Wan22T2VModel(WanT2VModel):
         self.capabilities.register(FlowMatchingSFTCapability, Wan22SFTCapability(self))
 
     def _load_transformer(self, model_path):
-        config = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
-        if config.get("model_type") != "t2v" or config.get("in_dim", 16) != 16:
+        checkpoint_config = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
+        if checkpoint_config.get("model_type") != "t2v" or checkpoint_config.get("in_dim", 16) != 16:
             raise ValueError(f"Expected a native Wan2.2 T2V checkpoint: {model_path}")
         return super()._load_transformer(model_path)
 
     def add_lora(self, rank, alpha, target_modules):
-        # Match DiffSynth's PEFT defaults, rather than the host's Gaussian init.
+        # Use DiffSynth's default PEFT initialization.
         self._inject_lora(LoraConfig(r=rank, lora_alpha=alpha, target_modules=target_modules))
         for parameter in self.transformer.parameters():
             if parameter.requires_grad:
@@ -52,15 +52,26 @@ class Wan22T2VModel(WanT2VModel):
     @contextmanager
     def transformer_forward_context(self):
         offload = self.config.get("training", {}).get("gradient_checkpointing_offload", False)
-        saved_tensors = torch.autograd.graph.save_on_cpu(pin_memory=self.device.type == "cuda") if offload and torch.is_grad_enabled() else nullcontext()
-        with super().transformer_forward_context(), saved_tensors:
+        if offload and torch.is_grad_enabled():
+            activation_storage = torch.autograd.graph.save_on_cpu(pin_memory=self.device.type == "cuda")
+        else:
+            activation_storage = nullcontext()
+        with super().transformer_forward_context(), activation_storage:
             yield
 
     def prepare_infer_latents(self, height, width, generator=None):
-        if self.config.get("inference", {}).get("rand_device", "cpu") != "cpu":
+        inference = self.config.get("inference", {})
+        if inference.get("rand_device", "cpu") != "cpu":
             return super().prepare_infer_latents(height, width, generator)
-        frames = self.config.get("inference", {}).get("num_frames", 49)
-        shape = (1, self._latent_channels(), (frames - 1) // self.vae_scale_factor_temporal + 1, height // self.vae_scale_factor_spatial, width // self.vae_scale_factor_spatial)
+        frames = inference.get("num_frames", 49)
+        latent_frames = (frames - 1) // self.vae_scale_factor_temporal + 1
+        shape = (
+            1,
+            self._latent_channels(),
+            latent_frames,
+            height // self.vae_scale_factor_spatial,
+            width // self.vae_scale_factor_spatial,
+        )
         cpu_generator = None if generator is None else torch.Generator("cpu").manual_seed(generator.initial_seed())
         noise = torch.randn(shape, generator=cpu_generator, dtype=torch.float32)
         return noise.to(device=self.device, dtype=self.latent_dtype)

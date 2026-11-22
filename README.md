@@ -145,3 +145,98 @@ NPROC_PER_NODE=8 bash scripts/infer_z_image.sh
 **Turbo 限制：** 这里实现常规 flow matching SFT，没有加载训练辅助 adapter 或进行再蒸馏。普通微调可能损害原模型的 8 步生成能力，不能把训练后的 LoRA 视为已保留 Turbo 加速。评估时可参考 30 步、CFG 2 的普通 SFT 设置；是否满足质量要求需用实际数据验证。需要保持少步能力时，应另外接入 differential LoRA / 蒸馏训练。参见 [DiffSynth 的 Z-Image 训练说明](https://github.com/modelscope/DiffSynth-Studio/blob/main/docs/en/Model_Details/Z-Image.md) 和 [Diffusers 官方 Z-Image pipeline](https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/z_image/pipeline_z_image.py)。
 
 2026-11-21 使用真实 Z-Image-Turbo 权重、32 张图片、约 1024×1024 目标面积，在 8 张 A100 40GB 上完成 1000 步 LoRA（250 轮），训练耗时约 29 分钟，保留每 100 步的全部 10 份 checkpoint。最终 476 个 LoRA tensor 均为有限值，训练步数及分布式恢复文件检查通过。另用 8 条验证提示词、seeds 42–49 完成原模型/最终 LoRA × 8 步无 CFG/30 步标准 CFG 2 的 32 张 1024×1024 推理图，逐 prompt 初始噪声哈希一致；图像可读性和 SHA256 检查通过。实验的脚本、配置、源码快照、日志、权重及对照图保存在本机 `/data/wushuo/exps/exps_1121/z_image_turbo_lora_dataset_v1_32_20261121_111037/`，不随代码仓库发布。该结果验证训练和推理链路，不代表广泛的生成质量评估。
+
+## HunyuanVideo 1.5 T2V SFT
+
+插件模块为 `lightx2v_train_plugin.hunyuan_video15`，模型名为 `hunyuan_video15_t2v`。提供 480p/720p T2V 的 LoRA 和全参数 flow matching SFT，默认加载原生权重目录 `/data/models/HunyuanVideo-1.5/transformer/480p_t2v`；720p 设置 `model.transformer_version: 720p_t2v`，并在缓存配置中调整视频尺寸。当前示例不涵盖 I2V、超分、蒸馏或 MeanFlow 变体。
+
+先从原始视频生成独立的 HunyuanVideo 1.5 VAE、文本条件缓存；Wan 缓存不能混用。元数据支持 CSV、JSON、JSONL，使用 `video`、`prompt` 列，视频相对路径从元数据所在目录解析。例如 CSV：
+
+```csv
+video,prompt
+videos/example.mp4,A cat walking in a garden
+```
+
+图片也可作为单帧 SFT 目标：缓存配置使用 `data.train.name: image_dataset`，JSONL 每行提供 `target_image` 和 `prompt`；`data.processor.height/width` 默认为 512。处理器按比例双线性缩放后中心裁剪，输出一帧 `[3,1,H,W]`。此路径学习画风与空间内容，不提供运动训练信号。LoRA 导出包含 rank/alpha 元数据，重载时保留缩放比例。
+
+在仓库根目录执行：
+
+```bash
+HY15_METADATA=/path/to/metadata.csv \
+  TRAIN_PYTHON=/app/miniconda/bin/python \
+  bash scripts/cache_hunyuan_video15.sh
+
+TRAIN_PYTHON=/app/miniconda/bin/python NPROC_PER_NODE=8 \
+  bash scripts/train_hunyuan_video15.sh
+
+CONFIG="$PWD/configs/hunyuan_video15/t2v_full.yaml" \
+  TRAIN_PYTHON=/app/miniconda/bin/python NPROC_PER_NODE=8 \
+  bash scripts/train_hunyuan_video15.sh
+```
+
+`HY15_MODEL_ROOT` 指向包含 `transformer/<version>`、`vae`、`text_encoder` 的原生模型根目录；`HY15_METADATA` 指定原始视频元数据；`HY15_OUTPUT_ROOT` 默认为仓库的 `outputs/hunyuan_video15`；`HY15_CACHE_DIR` 默认为 `${HY15_OUTPUT_ROOT}/cache`。缓存脚本默认单卡，可用 `NPROC_PER_NODE` 调整。缓存命令的额外参数传给主项目 `cache_data.py`，例如 `--overwrite`；训练配置可用 `CONFIG` 替换。
+
+缓存配方为 49 帧、480×832、从视频开头取帧、BF16 存储，关闭文本 dropout。训练直接读取 `cache_data.jsonl`，因此不加载 VAE/文本编码器。默认使用 BF16、梯度检查点、8 卡 FSDP2，不启用 sequence parallel；LoRA rank/alpha 为 32/32，目标层覆盖图像与文本分支注意力的 Q/K/V/输出投影。
+
+时间采样采用 logitnormal，并通过 `scheduler.time_shift_settings.time_shift_mu=3.0` 实施固定 shift；训练目标为 `noise - latent`。这里的 AdamW 配置是训练入口基线：LoRA 学习率 `1e-4`，全参数学习率 `1e-5`，均 warmup 100 步、训练 1000 步、每 100 步保存；不等同于官方 Muon 训练配方。正式训练前应按数据量和显存调整分辨率、步数与优化参数。输出分别位于 `${HY15_OUTPUT_ROOT}/lora`、`${HY15_OUTPUT_ROOT}/full`，默认不自动续训。
+
+`configs/hunyuan_video15/cache.yaml` 只生成缓存；`t2v_lora.yaml`、`t2v_full.yaml` 分别通过 `training.method: hunyuan_video15_sft` 启动 LoRA 和全参数训练。该 trainer 在 checkpoint 中保存已解析的模型配置，恢复时核验模型根目录、`transformer_path` 和 `transformer_version`；切换 base 或 480p/720p 变体需使用新的输出目录。测试与短步验证不代表已经完成生产规模训练或质量评估。
+
+全参数配置保留 FP32 主参数及 AdamW 状态，前向与 FSDP mixed precision 采用 BF16；其显存开销高于 LoRA。默认 480×832、49 帧的真实全参数训练显存与质量尚未验证，应先按资源缩短帧数/降低分辨率做短步验证。
+
+全参数配置在每个 checkpoint 目录额外导出 `diffusion_pytorch_model.safetensors` 和配套 `config.json`，可直接用 `HunyuanVideo15Transformer3DModel.from_pretrained(checkpoint_dir, torch_dtype=torch.bfloat16)` 加载。导出 tensor 名称采用 Diffusers 格式，不是 Tencent 原生权重名称，不要直接覆盖原生权重。若从该导出权重开始新训练，可在 YAML 中设置 `model.transformer_path: /path/to/checkpoint`；`model.pretrained_model_name_or_path` 仍指向原模型根目录，提供 VAE 和文本编码器。分布式 `dist_state/` 用于同一并行规模、同一模型变体的训练恢复；恢复已有优化器状态需在相同输出目录启用 `resume.auto_resume`。LoRA 配置保存独立 LoRA 权重及优化器恢复状态。
+
+默认 FSDP2 配置关闭 gradient_checkpointing_offload；当前 PyTorch/FSDP2 与 save_on_cpu 组合在反向阶段会出错，模型会拒绝同时启用。单卡非 FSDP 可按需启用 CPU 保存 tensor 卸载。末层不进入 latent loss 的文本输出投影和文本 MLP 被固定，避免无梯度分支导致优化器恢复失败。
+
+联合注意力使用 `[B,1,1,N]` 的紧凑 padding mask，并在输出投影前清零无效 query，避免每层显式分配 `[B,1,N,N]` mask；前向和输入、参数梯度已与 Diffusers 原处理器对比。此优化只缩小 mask，未改变注意力的计算复杂度。
+
+本机验证依赖为 `/app/miniconda/bin/python`、PyTorch 2.11.0、Diffusers 0.38.0、Transformers 5.9.0。权重转换在 CPU 内存进行，不改写原始 checkpoint；同时支持 Tencent 原生根目录与 Diffusers 本地目录。原生 Qwen 只加载语言塔，ByT5 加载 Glyph 专用权重与扩展词表。VAE 的 FP32 编码/解码已与原生实现做小尺寸数值对比。
+
+2026-11-17 HunyuanVideo 验证：完整插件回归 42 项通过，其中 HunyuanVideo 新增 15 项；真实 8.3B DiT 单卡两步 LoRA 训练通过；正式训练入口的双卡 FSDP2 首步、DCP 保存、恢复至第二步全部通过，loss 为 0.707083 / 0.587269。小尺寸缓存为 5 帧、32×32，该验证不能推断默认 480×832、49 帧的显存或质量；双卡小模型另覆盖全参数保存恢复和 Diffusers 导出重载。真实双卡日志和摘要位于 work/hy15_smoke/real_fsdp_summary.json 及 real_fsdp_lora_fresh.log / real_fsdp_lora_resume.log。
+
+2026-11-21 复核：完整 CPU 回归 57 项通过，包括紧凑注意力的前向/梯度一致性和恢复前的模型来源检查；三份 YAML 的插件注册、脚本语法及 Ruff 校验通过。原生 480p/720p DiT 与 VAE 的全部权重键名和形状均与转换后架构匹配。当前会话没有可用 CUDA，新增改动未重新进行真实多卡验证；上述 GPU 短步记录来自 11 月 17 日，整网转换前后的逐层数值一致性尚未验证。
+
+
+## SDXL Base 1.0 UNet LoRA / 全参数训练
+
+`plugins: [lightx2v_train_plugin.sdxl]` 提供 `model.name: sdxl`、`training.method: sdxl_sft` 和 `inference.method: sdxl_infer`。默认使用 `/data/models/stable-diffusion-xl-base-1.0`，训练范围是 UNet：LoRA 训练注意力的 `to_q,to_k,to_v,to_out.0`，全参数训练更新整个 UNet。VAE 和两个 CLIP 文本编码器只在独立缓存任务中加载，训练进程要求 `cache_dataset` 和 `inference.method: none`。
+
+缓存记录未缩放的 VAE posterior mean/logvar，训练每次重新采样 posterior，再乘 `0.13025`。双 CLIP 倒数第二层特征拼为 `[1,77,2048]`，第二个 CLIP 提供 `[1,1280]` pooled 特征，并缓存原图尺寸、实际中心裁剪偏移及目标尺寸组成的六维 time IDs。图像保留横竖方向，默认面积约 1024²、宽高对齐 64。训练采用 1000 个离散均匀 timestep、DDPM 加噪和 epsilon MSE。
+
+从仓库根目录运行，使用同一个 `SDXL_OUTPUT_ROOT`：
+
+```bash
+export SDXL_MODEL_ROOT=/data/models/stable-diffusion-xl-base-1.0
+export SDXL_OUTPUT_ROOT=/data/wushuo/exps/exps_1121/sdxl
+export SDXL_METADATA=/data/wushuo/data/dataset_v1_32/train.jsonl
+export SDXL_VALIDATION_METADATA=/data/wushuo/data/dataset_v1_32/val.jsonl
+
+# 独立生成训练 posterior + 双 CLIP 条件；验证集只需 prompt
+NPROC_PER_NODE=8 bash scripts/cache_sdxl.sh
+NPROC_PER_NODE=8 bash scripts/cache_sdxl.sh --data_split val
+
+# LoRA：rank/alpha=16/16，lr=1e-4，默认 1000 次更新
+NPROC_PER_NODE=8 bash scripts/train_sdxl.sh
+
+# 全 UNet：FP32 参数、BF16 前向，lr=1e-5
+CONFIG="$PWD/configs/sdxl/full.yaml" NPROC_PER_NODE=8 bash scripts/train_sdxl.sh
+
+# 从缓存的验证条件生成；Euler 30 步，标准 CFG 5，seeds 42–49
+SDXL_LORA="$SDXL_OUTPUT_ROOT/lora/checkpoint-000001000/pytorch_lora_weights.safetensors" \
+  NPROC_PER_NODE=8 bash scripts/infer_sdxl.sh
+
+# 全参数 checkpoint 导出为 Diffusers unet/，可直接用于推理
+SDXL_UNET_ROOT="$SDXL_OUTPUT_ROOT/full/checkpoint-000001000/unet" \
+  SDXL_INFER_OUTPUT="$SDXL_OUTPUT_ROOT/inference_full" \
+  NPROC_PER_NODE=8 bash scripts/infer_sdxl.sh
+```
+
+脚本支持 `CONFIG`、`TRAIN_PYTHON`、`LIGHTX2V_TRAIN_ROOT`、`SDXL_CACHE_DIR`、`SDXL_VAL_CACHE_DIR` 和 `SDXL_INFER_OUTPUT`。LoRA 推理以 `SDXL_LORA` 指定权重，留空生成 base；全参数权重以 `SDXL_UNET_ROOT` 指定导出的 `unet/`。推理也读取缓存，因此不会加载文本编码器；变更验证 prompt、negative prompt 或尺寸需要重建验证缓存。
+
+两种训练配置使用 8 卡 FSDP2 和梯度检查点；单卡时通过 `NPROC_PER_NODE=1` 启动，所需显存取决于训练模式与分辨率。每卡物理 batch 为 1，可用 `gradient_accumulation_iters` 增大有效 batch。LoRA 可训练参数保持 FP32，全参数训练保留 FP32 主参数。全参数 checkpoint 同时保存恢复用的分布式模型/优化器状态和推理用的 Diffusers `unet/`；LoRA 文件保留 rank/alpha 元数据。
+
+将自定义配置中的 `resume.auto_resume` 设为 `true`，在原输出目录继续训练。恢复会检查 world size、训练类型、base/UNet 路径、LoRA 配置、DDPM 调度器及缓存清单身份；缺少完整导出或来源信息的 checkpoint 会被拒绝。SDXL 缓存也校验版本、base 路径与 VAE scaling。原始图片、权重或裁剪配方改变后，请换一个缓存目录或传 `--overwrite`，避免主框架复用旧缓存。当前不支持 sequence parallel。
+
+2026-11-21 使用上述 32 图数据集及真实 SDXL Base 权重，在 8 张 A100 40GB 上分别完成 LoRA 和全 UNet 一轮训练（4 次更新），均成功保存后恢复到第 5 次更新。训练日志确认只加载 UNet；LoRA 导出 1120 个 FP32 tensor，全 UNet 导出 1680 个 FP32 tensor，均为有限值。另使用 8 条验证 prompt、seeds 42–49、Euler 30 步和 CFG 5 完成 base/LoRA/full 共 24 张 1024×1024 图；三组逐 prompt 初始噪声一致。CPU tiny UNet 验证覆盖 posterior 重新采样、epsilon 目标与真实 backward、rank=2/alpha=6 的 LoRA 保存/恢复及完整 UNet 导出重载。上述为训练链路短跑验证，不代表收敛或画风质量评估。配置、脚本、源码、日志、权重及对照图归档于 `/data/wushuo/exps/exps_1121/sdxl_unet_dataset_v1_32_20261121_1933/`。本机验证环境为 PyTorch 2.11.0+cu130、Diffusers 0.38.0、Transformers 5.9.0、PEFT 0.19.1。
+
+同日补充完成 8 卡 1000 步 LoRA（32 图、250 轮，训练阶段约 19 分 43 秒），保留每 100 步的全部 10 份 checkpoint。全部 1120 个 LoRA tensor 为有限 FP32；8 卡重新加载最终 checkpoint 后，模型、AdamW step/moments 和 LR scheduler 均恢复到第 1000 步。固定 32 图、5 个 timestep、160 个配对噪声样本的 epsilon MSE 从 `0.139061` 降至 `0.133155`（约 4.25%）；这是训练集拟合指标。另完成 8 条验证 prompt 的 base/最终 LoRA 共 16 张 1024×1024 对照图，逐 prompt 初始噪声一致。19 项归档检查通过，脚本、配置、源码、日志、10 份 checkpoint、MSE 明细和对照图保存在 `/data/wushuo/exps/exps_1121/sdxl_lora_1000_dataset_v1_32_20261121_114915_utc/`。

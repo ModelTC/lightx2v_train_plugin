@@ -30,7 +30,7 @@ class Wan22SFTCapability(WanFlowMatchingCapability):
             raise ValueError("model.expert must be 'high' or 'low'.")
         self.timestep_start, self.timestep_end = (0, 417) if expert == "high" else (417, 1000)
 
-        # Keep the reference's CPU float32 table, including its endpoints.
+        # DiffSynth's table includes sigma=1 and excludes sigma=0.
         sigmas = torch.linspace(1.0, 0.0, 1001)[:-1]
         self.sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
         self.timesteps = self.sigmas * 1000
@@ -50,16 +50,14 @@ class Wan22SFTCapability(WanFlowMatchingCapability):
                 "Wan2.2 SFT latent",
             )
 
-            # DiffSynth samples an index before drawing fresh bf16 noise.
-            index = torch.randint(self.timestep_start, self.timestep_end, (1,))
-            timestep = broadcast(self.timesteps[index].to(device=model.device, dtype=torch.bfloat16))
+            sampled_index = torch.randint(self.timestep_start, self.timestep_end, (1,))
+            timestep = broadcast(self.timesteps[sampled_index].to(device=model.device, dtype=torch.bfloat16))
             noise = broadcast(torch.randn_like(latent))
 
-            # The reference quantizes t to bf16, then looks up sigma and weight
-            # again. Keep that behavior, including the small boundary overlap.
-            table_index = torch.argmin((self.timesteps - timestep.cpu()).abs())
-            sigma = self.sigmas[table_index]
-            weight = self.training_weights[table_index]
+            # Match DiffSynth's BF16 timestep rounding before table lookup.
+            rounded_index = torch.argmin((self.timesteps - timestep.cpu()).abs())
+            sigma = self.sigmas[rounded_index]
+            loss_weight = self.training_weights[rounded_index]
             noisy_latent = (1 - sigma) * latent + sigma * noise
             target = noise - latent
             condition = _cached_condition(batch, model)
@@ -73,5 +71,5 @@ class Wan22SFTCapability(WanFlowMatchingCapability):
             condition,
         )
         mse = F.mse_loss(prediction.float(), target.float())
-        loss = mse * weight.to(device=mse.device)
-        return LossResult(loss=loss, metrics={"mse": mse.detach(), "sigma": sigma, "loss_weight": weight})
+        loss = mse * loss_weight.to(device=mse.device)
+        return LossResult(loss=loss, metrics={"mse": mse.detach(), "sigma": sigma, "loss_weight": loss_weight})
