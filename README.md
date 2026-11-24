@@ -88,9 +88,9 @@ TRAIN_PYTHON=/app/miniconda/bin/python NPROC_PER_NODE=8 \
 
 运行训练或生成前需使用具备主项目依赖及 GPU 访问的环境。
 
-## Z-Image-Turbo 图像 SFT / LoRA
+## Z-Image 图像 SFT / LoRA
 
-通过 `plugins: [lightx2v_train_plugin.z_image]` 注册 `model.name: z_image` 和图像处理器，复用主项目的 flow matching trainer、梯度检查点、FSDP2、LoRA 导出及断点恢复。使用包含 `ZImagePipeline` / `ZImageTransformer2DModel` 的 Diffusers；本机验证环境是 `/app/miniconda/bin/python`、Diffusers 0.38.0，权重已在 `/data/models/Z-Image-Turbo`。
+通过 `plugins: [lightx2v_train_plugin.z_image]` 注册 `model.name: z_image` 和图像处理器，复用主项目的 flow matching trainer、梯度检查点、FSDP2、LoRA 导出及断点恢复。默认权重是 `/data/models/Z-Image`，使用包含 `ZImagePipeline` / `ZImageTransformer2DModel` 的 Diffusers。训练前离线计算 VAE latent 和文本条件，训练阶段只加载、更新生成用的 DiT，VAE 和 text encoder 不参与优化。
 
 实现遵循官方接口：Qwen3 chat template、倒数第二层文本特征和去 padding；latent 编码为 `(z - shift_factor) * scaling_factor`，解码为 `z / scaling_factor + shift_factor`；DiT 输入 `t = 1 - sigma`，将其输出取负后与通用目标 `noise - latent` 比较。图像按面积缩放并中心裁剪，宽高对齐 16，保留横竖方向。缓存使用 VAE 分布的 mode，在线训练使用 sample；噪声、latent 状态和 loss 使用 FP32，DiT 前向使用 BF16。
 
@@ -110,7 +110,7 @@ Z_IMAGE_METADATA=/path/to/train.jsonl \
   bash scripts/cache_z_image.sh
 ```
 
-默认目标面积是 1024×1024；显式 `target_height/target_width` 优先。面积可在 `configs/z_image/cache.yaml` 的 `data.processor.target_area` 调整。缓存默认保存到 `outputs/z_image/cache`，脚本以 FP32 保存缓存，避免 latent 量化；可用 `Z_IMAGE_CACHE_DIR` 改变位置。未传 `--overwrite` 时主框架会复用已有 tensor；修改模型、图片或分辨率后，应使用新的缓存目录或显式传 `--overwrite` 重建。
+默认目标面积是 1024×1024；显式 `target_height/target_width` 优先。面积可在 `configs/z_image/cache.yaml` 的 `data.processor.target_area` 调整。缓存默认保存到 `outputs/z_image_base/cache`，脚本以 FP32 保存缓存；可用 `Z_IMAGE_CACHE_DIR` 改变位置。切换到 Z-Image 后重新生成缓存，默认目录与此前 Turbo 实验分开。未传 `--overwrite` 时主框架会复用已有 tensor；修改模型、图片或分辨率后，应使用新的缓存目录或显式传 `--overwrite` 重建。
 
 ### 训练和恢复
 
@@ -122,11 +122,13 @@ bash scripts/train_z_image.sh
 NPROC_PER_NODE=8 bash scripts/train_z_image.sh
 ```
 
-`configs/z_image/turbo_lora.yaml` 使用 logit-normal 时间采样和静态 shift=3，这是可调整的 SFT 基线配方。默认 LoRA 目标为 `to_q,to_k,to_v,to_out.0,w1,w2,w3`；每卡物理 batch 为 1，通过 `gradient_accumulation_iters` 增大有效 batch。此适配器不支持 sequence parallel，检测到多个序列并行 rank 时会在加载权重前报错；也未实现 Wan 插件的 CPU checkpoint offload。
+`configs/z_image/lora.yaml` 使用 logit-normal 时间采样和静态 shift=6，与 Z-Image 权重的 scheduler 配置一致。默认 LoRA 目标为 `to_q,to_k,to_v,to_out.0,w1,w2,w3`；每卡物理 batch 为 1，通过 `gradient_accumulation_iters` 增大有效 batch。此适配器不支持 sequence parallel，检测到多个序列并行 rank 时会在加载权重前报错；也未实现 Wan 插件的 CPU checkpoint offload。
+
+默认 `data.train.prompt_dropout_rate: 0.1`：缓存阶段提前编码空 prompt，训练时 10% 的样本使用空条件，不再运行 text encoder。该比例可调整；在线编码的 `image_dataset` 训练也支持 prompt dropout。
 
 可设置 `Z_IMAGE_MODEL_ROOT`、`Z_IMAGE_CACHE_DIR`、`Z_IMAGE_OUTPUT_DIR`、`TRAIN_PYTHON`、`LIGHTX2V_TRAIN_ROOT` 和 `CONFIG`。例如 `CONFIG=/path/to/custom.yaml bash scripts/train_z_image.sh`。需要在线编码时，将训练配置的 `data.train` 改成 `image_dataset` 并指向原始 JSONL；缓存训练的默认配置关闭训练中生成。
 
-默认输出 `outputs/z_image/lora/checkpoint-000000100/` 等目录，包含 `pytorch_lora_weights.safetensors` 和训练状态。把配置中的 `resume.auto_resume` 设为 `true` 可继续同一输出目录，恢复时保持 world size 和 LoRA 配置一致。全量 DiT SFT 可设置 `training.train_type: full`，需自行确定资源及优化参数；此处提供和验证的是 LoRA 配方。
+默认输出 `outputs/z_image_base/lora/checkpoint-000000100/` 等目录，包含 `pytorch_lora_weights.safetensors` 和训练状态。把配置中的 `resume.auto_resume` 设为 `true` 可继续同一 Z-Image 训练，恢复时保持基础权重、world size 和 LoRA 配置一致；不要从此前 Turbo 的 checkpoint 恢复。全量 DiT SFT 可设置 `training.train_type: full`，需自行确定资源及优化参数；默认提供 LoRA 配方。
 
 ### 推理
 
@@ -138,13 +140,15 @@ Z_IMAGE_LORA=/path/to/checkpoint-000001000/pytorch_lora_weights.safetensors \
 NPROC_PER_NODE=8 bash scripts/infer_z_image.sh
 ```
 
-`configs/z_image/turbo_infer.yaml` 默认使用 1024×1024、30 步、静态 shift=3，输出到 `outputs/z_image/inference`。`Z_IMAGE_INFER_OUTPUT` 可以改变输出目录；`Z_IMAGE_LORA` 留空时生成原模型结果。`seed: 42` 按 prompt 索引递增为 42、43 等；对照时使用同一元数据和 seed。未启用多卡时，脚本默认单卡。
+`configs/z_image/infer.yaml` 默认使用 1024×1024、50 步、静态 shift=6、原生 CFG 4，输出到 `outputs/z_image_base/inference`。`Z_IMAGE_INFER_OUTPUT` 可以改变输出目录；`Z_IMAGE_LORA` 留空时生成原模型结果。`seed: 42` 按 prompt 索引递增为 42、43 等；对照时使用同一元数据和 seed。未启用多卡时，脚本默认单卡。
 
-这里的 `cfg_guidance_scale` 遵循 Z-Image 原生公式 `positive + scale * (positive - negative)`，所以原生值 `1.0` 等于标准 CFG 2。评估 Turbo 少步效果时，使用自定义配置将 `num_inference_steps` 改成 `8`、`enable_cfg` 改成 `false`；主框架的 8 步对应官方 pipeline `num_inference_steps=9` 的 8 次有效前向。可通过 `CONFIG=/path/to/infer.yaml` 选择配置。
+这里的 50 步是主框架的 50 次有效 Euler 更新；当前 Diffusers `ZImagePipeline` 将终点 sigma=0 计入步数，对应其 `num_inference_steps=51`，与官方示例传入 50 步的网格不同。
 
-**Turbo 限制：** 这里实现常规 flow matching SFT，没有加载训练辅助 adapter 或进行再蒸馏。普通微调可能损害原模型的 8 步生成能力，不能把训练后的 LoRA 视为已保留 Turbo 加速。评估时可参考 30 步、CFG 2 的普通 SFT 设置；是否满足质量要求需用实际数据验证。需要保持少步能力时，应另外接入 differential LoRA / 蒸馏训练。参见 [DiffSynth 的 Z-Image 训练说明](https://github.com/modelscope/DiffSynth-Studio/blob/main/docs/en/Model_Details/Z-Image.md) 和 [Diffusers 官方 Z-Image pipeline](https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/z_image/pipeline_z_image.py)。
+这里的 `cfg_guidance_scale` 遵循 Z-Image 原生公式 `positive + scale * (positive - negative)`，因此默认原生值 `4.0` 等于标准 CFG 5。`negative_prompt` 默认为空，可在推理配置中设置；可通过 `CONFIG=/path/to/infer.yaml` 选择配置。该入口使用普通 flow matching SFT，不进行蒸馏。
 
-2026-11-21 使用真实 Z-Image-Turbo 权重、32 张图片、约 1024×1024 目标面积，在 8 张 A100 40GB 上完成 1000 步 LoRA（250 轮），训练耗时约 29 分钟，保留每 100 步的全部 10 份 checkpoint。最终 476 个 LoRA tensor 均为有限值，训练步数及分布式恢复文件检查通过。另用 8 条验证提示词、seeds 42–49 完成原模型/最终 LoRA × 8 步无 CFG/30 步标准 CFG 2 的 32 张 1024×1024 推理图，逐 prompt 初始噪声哈希一致；图像可读性和 SHA256 检查通过。实验的脚本、配置、源码快照、日志、权重及对照图保存在本机 `/data/wushuo/exps/exps_1121/z_image_turbo_lora_dataset_v1_32_20261121_111037/`，不随代码仓库发布。该结果验证训练和推理链路，不代表广泛的生成质量评估。
+模型和推理参数参见 [Z-Image 官方模型说明](https://huggingface.co/Tongyi-MAI/Z-Image) 和 [Diffusers 官方 Z-Image pipeline](https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/z_image/pipeline_z_image.py)。
+
+历史 Turbo 实验：2026-11-21 在 8 张 A100 40GB 上对 32 张图片完成 1000 步 LoRA，并生成原模型/LoRA 推理对照。归档位于本机 `/data/wushuo/exps/exps_1121/z_image_turbo_lora_dataset_v1_32_20261121_111037/`，不随代码仓库发布；该实验使用 Z-Image-Turbo 权重，不作为 Z-Image 基础模型的训练或质量验证。
 
 ## HunyuanVideo 1.5 T2V SFT
 

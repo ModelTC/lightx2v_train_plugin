@@ -1,4 +1,4 @@
-"""Z-Image-Turbo adapter with native image-list inputs and flow-matching loss."""
+"""Z-Image adapter with native image-list inputs and flow-matching loss."""
 
 import math
 

@@ -8,4 +8,4 @@ export PYTHONPATH="${LIGHTX2V_TRAIN_ROOT}/lightx2v_train:${LIGHTX2V_TRAIN_ROOT}:
 exec "${TRAIN_PYTHON:-/app/miniconda/bin/python}" -m torch.distributed.run \
   --standalone --nproc_per_node="${NPROC_PER_NODE:-1}" \
   "${LIGHTX2V_TRAIN_ROOT}/lightx2v_train/infer.py" \
-  --config "${CONFIG:-${LIGHTX2V_PLUGIN_ROOT}/configs/z_image/turbo_infer.yaml}" "$@"
+  --config "${CONFIG:-${LIGHTX2V_PLUGIN_ROOT}/configs/z_image/infer.yaml}" "$@"

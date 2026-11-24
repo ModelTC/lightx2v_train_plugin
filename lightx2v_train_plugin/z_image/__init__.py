@@ -1,4 +1,4 @@
-"""Z-Image-Turbo training support for the LightX2V training host."""
+"""Z-Image training support for the LightX2V training host."""
 
 from . import data_process, model
 

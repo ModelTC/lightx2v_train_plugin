@@ -1,4 +1,4 @@
-"""Image preprocessing for Z-Image-Turbo training."""
+"""Image preprocessing for Z-Image training."""
 
 from diffusers.image_processor import VaeImageProcessor
 from lightx2v_train.utils.image_ops import (

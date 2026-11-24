@@ -6,7 +6,7 @@ runtime:
 
 model:
   name: z_image
-  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image-Turbo}
+  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image}
   max_sequence_length: 512
   running_dtype: bf16
   transformer_param_dtype: bf16
@@ -40,8 +40,8 @@ data:
   train:
     name: cache_dataset
     data_path:
-      - ${oc.env:Z_IMAGE_CACHE_DIR,/data/wushuo/lightx2v_train_plugin/outputs/z_image/cache}/cache_data.jsonl
-    prompt_dropout_rate: 0.0
+      - ${oc.env:Z_IMAGE_CACHE_DIR,/data/wushuo/lightx2v_train_plugin/outputs/z_image_base/cache}/cache_data.jsonl
+    prompt_dropout_rate: 0.1
     num_workers: 0
     pin_memory: true
     shuffle: true
@@ -56,7 +56,7 @@ scheduler:
   time_shift_settings:
     do_time_shift: true
     shift_type: linear
-    time_shift_mu: 3.0
+    time_shift_mu: 6.0
     time_shift_power: 1.0
     dynamic_shift: false
 
@@ -81,7 +81,7 @@ training:
     adam_beta2: 0.999
     weight_decay: 0.01
     adam_epsilon: 0.00000001
-  output_dir: ${oc.env:Z_IMAGE_OUTPUT_DIR,/data/wushuo/lightx2v_train_plugin/outputs/z_image/lora}
+  output_dir: ${oc.env:Z_IMAGE_OUTPUT_DIR,/data/wushuo/lightx2v_train_plugin/outputs/z_image_base/lora}
 
 inference:
   method: none

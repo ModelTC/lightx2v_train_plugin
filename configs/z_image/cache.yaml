@@ -6,7 +6,7 @@ runtime:
 
 model:
   name: z_image
-  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image-Turbo}
+  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image}
   max_sequence_length: 512
   running_dtype: bf16
   transformer_param_dtype: bf16
@@ -32,7 +32,7 @@ data:
     name: image_dataset
     data_path:
       - ${oc.env:Z_IMAGE_METADATA,/data/wushuo/lightx2v_train_plugin/outputs/z_image/data/train.jsonl}
-    prompt_dropout_rate: 0.0
+    prompt_dropout_rate: 0.1
     num_workers: 0
     shuffle: false
 

@@ -6,7 +6,7 @@ runtime:
 
 model:
   name: z_image
-  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image-Turbo}
+  pretrained_model_name_or_path: ${oc.env:Z_IMAGE_MODEL_ROOT,/data/models/Z-Image}
   max_sequence_length: 512
   running_dtype: bf16
   transformer_param_dtype: bf16
@@ -48,7 +48,7 @@ scheduler:
   time_shift_settings:
     do_time_shift: true
     shift_type: linear
-    time_shift_mu: 3.0
+    time_shift_mu: 6.0
     time_shift_power: 1.0
     dynamic_shift: false
 
@@ -56,13 +56,14 @@ inference:
   method: image_infer
   default_height: 1024
   default_width: 1024
-  num_inference_steps: 30
+  # Effective Euler updates; ZImagePipeline counts this as 51 steps.
+  num_inference_steps: 50
   enable_cfg: true
-  # Native Z-Image guidance 1 equals standard CFG 2.
-  cfg_guidance_scale: 1.0
+  # Native Z-Image guidance 4 equals standard CFG 5.
+  cfg_guidance_scale: 4.0
   negative_prompt: ""
   seed: 42
-  output_dir: ${oc.env:Z_IMAGE_INFER_OUTPUT,/data/wushuo/lightx2v_train_plugin/outputs/z_image/inference}
+  output_dir: ${oc.env:Z_IMAGE_INFER_OUTPUT,/data/wushuo/lightx2v_train_plugin/outputs/z_image_base/inference}
   lora_config:
     path: ${oc.env:Z_IMAGE_LORA,''}
 
